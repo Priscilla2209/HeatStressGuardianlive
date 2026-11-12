@@ -2,23 +2,24 @@ name: Backend - Heat Stress AI
 
 on:
   schedule:
-    - cron: "*/5 * * * *"     # every 5 minutes (GitHub may run it a few minutes late)
-  workflow_dispatch:           # adds a "Run workflow" button for manual tests
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
 
 jobs:
   explain:
     runs-on: ubuntu-latest
-    timeout-minutes: 3
-    defaults:
-      run:
-        working-directory: backend/ai-service
+    timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - run: pip install -r requirements.txt
-      - run: python ai_service.py --once
+      - name: Get the code
+        run: git clone --depth 1 "https://github.com/${{ github.repository }}.git" repo
+
+      - name: Run the AI service
+        working-directory: repo/backend/ai-service
+        run: |
+          python3 -m venv .venv
+          . .venv/bin/activate
+          pip install -q -r requirements.txt
+          python ai_service.py --once
         env:
           FIREBASE_API_KEY: ${{ secrets.FIREBASE_API_KEY }}
           FIREBASE_EMAIL: ${{ secrets.FIREBASE_EMAIL }}
