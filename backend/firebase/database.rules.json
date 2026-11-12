@@ -1,0 +1,8 @@
+{
+  "rules": {
+    "HeatStressGuardian": {
+      ".read": "auth != null",
+      ".write": "auth != null"
+    }
+  }
+}

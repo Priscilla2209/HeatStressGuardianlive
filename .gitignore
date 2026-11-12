@@ -1,0 +1,13 @@
+# Private logins - never upload these
+backend/arduino/HeatStressGuardian/secrets.h
+secrets.h
+ai_settings.env
+.env
+
+# Build and editor files
+__pycache__/
+*.pyc
+.pio/
+.vscode/
+.DS_Store
+Thumbs.db
