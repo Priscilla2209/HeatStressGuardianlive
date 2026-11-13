@@ -126,6 +126,9 @@ main { max-width:1280px; margin:0 auto; padding:24px 28px 40px; display:grid; ga
 .map { margin:14px 20px 0; border-radius:12px; overflow:hidden; border:1px solid var(--line); height:210px; background:var(--surface-2); display:grid; place-items:center; }
 .map iframe { width:100%; height:100%; border:0; }
 .map-empty { text-align:center; color:var(--muted); font-size:13px; padding:20px; }
+.share { display:flex; align-items:center; gap:10px; flex-wrap:wrap; padding:0 20px 18px; font-size:12.5px; color:var(--muted); }
+.share button { font:inherit; font-size:13px; font-weight:600; padding:8px 14px; border-radius:999px; border:1px solid var(--accent); background:none; color:var(--accent); cursor:pointer; }
+.share button.on { background:var(--accent); color:#fff; }
 .map-meta { display:flex; justify-content:space-between; padding:12px 20px 18px; font-size:12.5px; color:var(--muted); }
 .timeline { list-style:none; margin:0; padding:10px 20px 18px; }
 .timeline li { display:grid; grid-template-columns:14px 1fr; gap:12px; padding:10px 0; border-bottom:1px solid var(--line); }
@@ -228,6 +231,7 @@ footer { max-width:1280px; margin:0 auto; padding:0 28px 32px; font-size:12px; c
           <div class="card-h"><h2>Worker location</h2><span id="gps-state">GPS</span></div>
           <div class="map" id="map"><div class="map-empty">Searching for GPS signal…</div></div>
           <div class="map-meta"><span id="gps-coords">-</span><a id="gps-link" href="#" target="_blank" rel="noopener" class="hidden">Open in Maps ↗</a></div>
+          <div class="share"><button id="share-btn" type="button">Share this phone's location</button><span id="share-state">Use on the hotspot phone the worker carries</span></div>
         </section>
         <section class="card">
           <div class="card-h"><h2>Alert history</h2><span>AI explanations</span></div>
@@ -244,7 +248,7 @@ footer { max-width:1280px; margin:0 auto; padding:0 28px 32px; font-size:12px; c
 
 <script type="module">
 // =====================================================================
-//  FIREBASE WEB CONFIG
+//  PASTE YOUR FIREBASE WEB CONFIG HERE
 //  Firebase console > Settings (gear) > General > Your apps > Web app
 // =====================================================================
 const firebaseConfig = {
@@ -261,6 +265,8 @@ const STALE_MS = 2 * 60 * 1000;
 const $ = id => document.getElementById(id);
 const esc = s => String(s).replace(/[&<>"']/g, c => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[c]));
 const num = v => typeof v === "number" && isFinite(v);
+let clockOffset = 0;                       // difference between this computer's clock and Firebase's clock
+const serverNow = () => Date.now() + clockOffset;
 
 /* ---------------- theme ---------------- */
 function setTheme(t) {
@@ -300,7 +306,7 @@ $("kpis").innerHTML = KPIS.map(k => `
 /* ---------------- helpers ---------------- */
 function timeAgo(ms) {
   if (!num(ms)) return "-";
-  const s = Math.max(0, Math.round((Date.now() - ms) / 1000));
+  const s = Math.max(0, Math.round((serverNow() - ms) / 1000));
   if (s < 60) return s + " s ago";
   if (s < 3600) return Math.round(s / 60) + " min ago";
   return new Date(ms).toLocaleString([], { day:"numeric", month:"short", hour:"2-digit", minute:"2-digit" });
@@ -316,10 +322,11 @@ function sparkPath(vals, w = 110, h = 34) {
 }
 
 /* ---------------- state ---------------- */
+let phoneLoc = null, shareWriter = null;
 let latest = null, lastHistory = [], lastStatus = null, lastAI = null, mapKey = "";
 
 function statusOf() {
-  const stale = !latest || !num(latest.timestamp) || Date.now() - latest.timestamp > STALE_MS;
+  const stale = !latest || !num(latest.timestamp) || serverNow() - latest.timestamp > STALE_MS;
   return stale ? "OFFLINE" : (latest.status || "SAFE");
 }
 
@@ -361,36 +368,72 @@ function renderLatest() {
     const ok = k.valid ? k.valid(latest) : num(latest[k.key]);
     let html;
     if (k.id === "mot") html = latest.motion ? "Moving" : "Still";
+    else if (k.id === "worn") html = latest.worn === undefined ? "-" : (latest.worn ? "Worn" : `<span style="color:var(--c-hr)">Not worn</span>`);
     else if (k.id === "hr" && !latest.fingerDetected) html = `<span style="font-size:18px;color:var(--muted)">No finger</span>`;
     else html = ok ? latest[k.key].toFixed(k.dp) + `<small>${k.unit}</small>` : "-";
     setText($("v-" + k.id), html);
     const d = $("d-" + k.id);
-    if (k.id !== "mot" && ok && ago && num(ago[k.key]) && (!k.valid || k.valid(ago))) {
+    if (k.id !== "mot" && k.id !== "worn" && ok && ago && num(ago[k.key]) && (!k.valid || k.valid(ago))) {
       const diff = latest[k.key] - ago[k.key];
       d.className = "delta " + (diff > 0.05 ? "up" : diff < -0.05 ? "down" : "");
       d.textContent = (diff > 0 ? "▲ " : diff < 0 ? "▼ " : "") + Math.abs(diff).toFixed(k.dp) + " " + k.unit + " in 10 min";
-    } else d.innerHTML = k.id === "mot" ? (latest.motion ? "movement detected" : "no movement") : "&nbsp;";
+    } else d.innerHTML = k.id === "mot" ? (latest.motion ? "movement detected" : "no movement")
+      + (latest.worn === undefined ? "" : latest.worn ? " · band worn" : ' · <span style="color:var(--c-hr)">band not worn</span>') : "&nbsp;";
   });
 
-  // GPS
-  if (latest.gpsFix && num(latest.latitude)) {
-    const la = latest.latitude, lo = latest.longitude, key = la.toFixed(4) + "," + lo.toFixed(4);
-    $("gps-state").textContent = `Fix · ${latest.satellites || 0} satellites`;
+  renderLocation();
+  renderHero();
+}
+
+// Location: GPS module first, phone location as backup (if under 2 minutes old)
+function renderLocation() {
+  let la, lo, label;
+  if (latest && latest.gpsFix && num(latest.latitude)) {
+    la = latest.latitude; lo = latest.longitude; label = `GPS module · ${latest.satellites || 0} satellites`;
+  } else if (phoneLoc && num(phoneLoc.latitude) && serverNow() - phoneLoc.timestamp < STALE_MS) {
+    la = phoneLoc.latitude; lo = phoneLoc.longitude;
+    label = `Phone location · ±${Math.round(phoneLoc.accuracy || 0)} m`;
+  }
+  if (la !== undefined) {
+    const key = la.toFixed(4) + "," + lo.toFixed(4);
+    $("gps-state").textContent = label;
     $("gps-coords").textContent = `${la.toFixed(5)}, ${lo.toFixed(5)}`;
     $("gps-link").href = `https://www.google.com/maps?q=${la},${lo}`; $("gps-link").classList.remove("hidden");
     if (key !== mapKey) { mapKey = key; $("map").innerHTML = `<iframe title="Worker location" loading="lazy" src="https://maps.google.com/maps?q=${la},${lo}&z=16&output=embed"></iframe>`; }
   } else {
-    $("gps-state").textContent = `Searching · ${latest.satellites || 0} satellites`;
-    if (mapKey !== "none") { mapKey = "none"; $("map").innerHTML = `<div class="map-empty"><svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M12 21s7-6.2 7-11.5A7 7 0 0 0 5 9.5C5 14.8 12 21 12 21z"/><circle cx="12" cy="9.5" r="2.5"/></svg><br>Searching for GPS signal…<br><span style="font-size:12px">Works best outdoors or near a window</span></div>`; }
+    $("gps-state").textContent = `Searching · ${(latest && latest.satellites) || 0} satellites`;
+    if (mapKey !== "none") { mapKey = "none"; $("map").innerHTML = `<div class="map-empty"><svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M12 21s7-6.2 7-11.5A7 7 0 0 0 5 9.5C5 14.8 12 21 12 21z"/><circle cx="12" cy="9.5" r="2.5"/></svg><br>Searching for GPS signal…<br><span style="font-size:12px">Works best outdoors, or tap "Share this phone's location"</span></div>`; }
     $("gps-coords").textContent = "No location yet"; $("gps-link").classList.add("hidden");
   }
-  renderHero();
 }
+
+// Share button: asks the phone for permission, then sends its location every few seconds
+let watchId = null, lastSent = 0;
+$("share-btn").onclick = () => {
+  const btn = $("share-btn"), st = $("share-state");
+  if (watchId !== null) {
+    navigator.geolocation.clearWatch(watchId); watchId = null;
+    btn.classList.remove("on"); btn.textContent = "Share this phone's location"; st.textContent = "Stopped sharing"; return;
+  }
+  if (!navigator.geolocation) { st.textContent = "This browser cannot share location"; return; }
+  st.textContent = "Asking for permission…";
+  watchId = navigator.geolocation.watchPosition(pos => {
+    btn.classList.add("on"); btn.textContent = "Stop sharing";
+    const loc = { latitude: pos.coords.latitude, longitude: pos.coords.longitude, accuracy: pos.coords.accuracy, timestamp: serverNow() };
+    st.textContent = `Sharing · accurate to ${Math.round(loc.accuracy)} m · keep this page open`;
+    if (Date.now() - lastSent < 5000) return; lastSent = Date.now();
+    if (shareWriter) shareWriter(loc); else { phoneLoc = loc; renderLocation(); }
+  }, err => {
+    st.textContent = err.code === 1 ? "Location blocked. Allow location for this site in the browser settings." : "Could not get location: " + err.message;
+    if (watchId !== null) navigator.geolocation.clearWatch(watchId); watchId = null;
+    btn.classList.remove("on"); btn.textContent = "Share this phone's location";
+  }, { enableHighAccuracy: true, maximumAge: 5000, timeout: 30000 });
+};
 
 function renderHistory(rows) {
   lastHistory = rows.filter(r => r && num(r.timestamp)).sort((a, b) => a.timestamp - b.timestamp).slice(-60);
   KPIS.forEach(k => {
-    if (k.id === "mot") { $("s-mot").innerHTML = ""; return; }
+    if (k.id === "mot" || k.id === "worn") { $("s-" + k.id).innerHTML = ""; return; }
     const vals = lastHistory.map(r => (k.valid ? k.valid(r) : num(r[k.key])) ? r[k.key] : null);
     $("s-" + k.id).innerHTML = `<path d="${sparkPath(vals)}" fill="none" stroke="var(--spark)" stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round"/>`;
   });
@@ -460,7 +503,7 @@ function runDemo() {
     const hi = 28.4 + (end - 28.4) * Math.pow(f, 1.3) + w;
     return { timestamp: now - (n - 1 - i) * 30000, heatIndex: hi, temperature: 26.2 + (hi - 28.4) * 0.62 + w * .4,
       humidity: 58 + f * 9 + Math.sin(i) * 1.2, heartRate: Math.round(78 + f * [10, 28, 52][level] + Math.sin(i * 2.3) * 3),
-      fingerDetected: i % 17 !== 5, irObjectTemp: 33.2 + f * [0.6, 2.2, 3.6][level] + w * .3, lm35Temperature: 31.5 + f * 1.8 + w * .3,
+      fingerDetected: i % 17 !== 5, worn: true, irObjectTemp: 33.2 + f * [0.6, 2.2, 3.6][level] + w * .3, lm35Temperature: 31.5 + f * 1.8 + w * .3,
       motion: i % 4 ? 1 : 0, riskLevel: hi >= 41 ? 2 : hi >= 32 ? 1 : 0 };
   });
   const last = hist[n - 1];
@@ -488,7 +531,7 @@ function runDemo() {
 async function runLive() {
   const { initializeApp } = await import("https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js");
   const { getAuth, signInWithEmailAndPassword, onAuthStateChanged, signOut } = await import("https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js");
-  const { getDatabase, ref, onValue, query, limitToLast } = await import("https://www.gstatic.com/firebasejs/10.12.2/firebase-database.js");
+  const { getDatabase, ref, onValue, query, limitToLast, set, serverTimestamp } = await import("https://www.gstatic.com/firebasejs/10.12.2/firebase-database.js");
   const app = initializeApp(firebaseConfig);
   const auth = getAuth(app), db = getDatabase(app);
   let listening = false;
@@ -504,9 +547,13 @@ async function runLive() {
     if (!user) { showLogin(); return; }
     showApp();
     if (listening) return; listening = true;
+    onValue(ref(db, ".info/serverTimeOffset"), s => { clockOffset = s.val() || 0; renderHero(); });
     onValue(ref(db, "HeatStressGuardian/latest"), s => { latest = s.val(); renderLatest(); renderHero(); });
     onValue(query(ref(db, "HeatStressGuardian/history"), limitToLast(60)), s => renderHistory(Object.values(s.val() || {})));
     onValue(ref(db, "HeatStressGuardian/ai/latest"), s => renderAI(s.val()));
+    onValue(ref(db, "HeatStressGuardian/phoneLocation"), s => { phoneLoc = s.val(); renderLocation(); });
+    shareWriter = loc => set(ref(db, "HeatStressGuardian/phoneLocation"), { ...loc, timestamp: serverTimestamp() })
+      .catch(e => { $("share-state").textContent = "Could not save: " + (e.code || e.message); });
     onValue(query(ref(db, "HeatStressGuardian/ai/history"), limitToLast(10)), s => renderAlerts(Object.values(s.val() || {})));
   });
 }
