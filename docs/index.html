@@ -408,7 +408,10 @@ function renderLocation() {
 }
 
 // Share button: asks the phone for permission, then sends its location every few seconds
-let watchId = null, lastSent = 0;
+let watchId = null, lastSent = 0, lastPos = null;
+function sendPos(loc) { if (shareWriter) shareWriter(loc); else { phoneLoc = { ...loc, timestamp: serverNow() }; renderLocation(); } }
+// Phones send no new position while standing still, so resend the last one every 10 s
+setInterval(() => { if (watchId !== null && lastPos && Date.now() - lastSent >= 10000) { lastSent = Date.now(); sendPos(lastPos); } }, 2000);
 $("share-btn").onclick = () => {
   const btn = $("share-btn"), st = $("share-state");
   if (watchId !== null) {
@@ -421,8 +424,9 @@ $("share-btn").onclick = () => {
     btn.classList.add("on"); btn.textContent = "Stop sharing";
     const loc = { latitude: pos.coords.latitude, longitude: pos.coords.longitude, accuracy: pos.coords.accuracy, timestamp: serverNow() };
     st.textContent = `Sharing · accurate to ${Math.round(loc.accuracy)} m · keep this page open`;
+    lastPos = loc;
     if (Date.now() - lastSent < 5000) return; lastSent = Date.now();
-    if (shareWriter) shareWriter(loc); else { phoneLoc = loc; renderLocation(); }
+    sendPos(loc);
   }, err => {
     st.textContent = err.code === 1 ? "Location blocked. Allow location for this site in the browser settings." : "Could not get location: " + err.message;
     if (watchId !== null) navigator.geolocation.clearWatch(watchId); watchId = null;
