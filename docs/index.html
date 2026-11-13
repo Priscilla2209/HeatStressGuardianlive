@@ -129,6 +129,16 @@ main { max-width:1280px; margin:0 auto; padding:24px 28px 40px; display:grid; ga
 .share { display:flex; align-items:center; gap:10px; flex-wrap:wrap; padding:0 20px 18px; font-size:12.5px; color:var(--muted); }
 .share button { font:inherit; font-size:13px; font-weight:600; padding:8px 14px; border-radius:999px; border:1px solid var(--accent); background:none; color:var(--accent); cursor:pointer; }
 .share button.on { background:var(--accent); color:#fff; }
+.hrcam { padding:0 20px 18px; }
+.hrcam p { margin:0 0 12px; font-size:13px; color:var(--muted); line-height:1.45; }
+.hrcam-row { display:flex; align-items:center; gap:12px; flex-wrap:wrap; }
+.hrcam button { font:inherit; font-size:13px; font-weight:600; padding:9px 16px; border-radius:999px; border:0; background:var(--c-hr); color:#fff; cursor:pointer; }
+.hrcam button.stop { background:none; color:var(--c-hr); border:1px solid var(--c-hr); }
+.hrcam-bpm { font-size:30px; font-weight:700; color:var(--ink); }
+.hrcam-bpm small { font-size:13px; font-weight:500; color:var(--muted); margin-left:4px; }
+.hrcam canvas { display:block; width:100%; height:60px; margin-top:12px; border-radius:10px; background:var(--surface-2); }
+.hrcam-bar { height:6px; border-radius:999px; background:var(--surface-2); margin-top:10px; overflow:hidden; }
+.hrcam-bar i { display:block; height:100%; width:0; background:var(--c-hr); transition:width .3s; }
 .map-meta { display:flex; justify-content:space-between; padding:12px 20px 18px; font-size:12.5px; color:var(--muted); }
 .timeline { list-style:none; margin:0; padding:10px 20px 18px; }
 .timeline li { display:grid; grid-template-columns:14px 1fr; gap:12px; padding:10px 0; border-bottom:1px solid var(--line); }
@@ -228,6 +238,17 @@ footer { max-width:1280px; margin:0 auto; padding:0 28px 32px; font-size:12px; c
 
       <div style="display:grid;gap:20px;align-content:start;min-width:0">
         <section class="card">
+          <div class="card-h"><h2>Heart rate check</h2><span>Phone camera</span></div>
+          <div class="hrcam">
+            <p>On the worker's phone: tap the button, then cover the back camera and flash fully with a fingertip. Hold still for about 20 seconds.</p>
+            <div class="hrcam-row"><button id="hr-btn" type="button">Measure heart rate</button><span class="hrcam-bpm" id="hr-val"></span></div>
+            <div class="hrcam-bar"><i id="hr-bar"></i></div>
+            <p id="hr-state" style="margin:8px 0 0">Not measuring</p>
+            <canvas id="hr-wave" width="600" height="120" class="hidden"></canvas>
+            <video id="hr-video" playsinline muted style="display:none"></video>
+          </div>
+        </section>
+        <section class="card">
           <div class="card-h"><h2>Worker location</h2><span id="gps-state">GPS</span></div>
           <div class="map" id="map"><div class="map-empty">Searching for GPS signal…</div></div>
           <div class="map-meta"><span id="gps-coords">-</span><a id="gps-link" href="#" target="_blank" rel="noopener" class="hidden">Open in Maps ↗</a></div>
@@ -322,7 +343,8 @@ function sparkPath(vals, w = 110, h = 34) {
 }
 
 /* ---------------- state ---------------- */
-let phoneLoc = null, shareWriter = null;
+let phoneLoc = null, shareWriter = null, phoneHeart = null, heartWriter = null;
+const HEART_FRESH_MS = 10 * 60 * 1000;   // a phone measurement counts for 10 minutes
 let latest = null, lastHistory = [], lastStatus = null, lastAI = null, mapKey = "";
 
 function statusOf() {
@@ -369,6 +391,7 @@ function renderLatest() {
     let html;
     if (k.id === "mot") html = latest.motion ? "Moving" : "Still";
     else if (k.id === "worn") html = latest.worn === undefined ? "-" : (latest.worn ? "Worn" : `<span style="color:var(--c-hr)">Not worn</span>`);
+    else if (k.id === "hr" && !latest.fingerDetected && phoneHeartFresh()) html = phoneHeart.bpm + `<small>BPM</small>`;
     else if (k.id === "hr" && !latest.fingerDetected) html = `<span style="font-size:18px;color:var(--muted)">No finger</span>`;
     else html = ok ? latest[k.key].toFixed(k.dp) + `<small>${k.unit}</small>` : "-";
     setText($("v-" + k.id), html);
@@ -377,6 +400,8 @@ function renderLatest() {
       const diff = latest[k.key] - ago[k.key];
       d.className = "delta " + (diff > 0.05 ? "up" : diff < -0.05 ? "down" : "");
       d.textContent = (diff > 0 ? "▲ " : diff < 0 ? "▼ " : "") + Math.abs(diff).toFixed(k.dp) + " " + k.unit + " in 10 min";
+    } else if (k.id === "hr" && !latest.fingerDetected && phoneHeartFresh()) {
+      d.className = "delta"; d.textContent = "phone camera · " + timeAgo(phoneHeart.timestamp);
     } else d.innerHTML = k.id === "mot" ? (latest.motion ? "movement detected" : "no movement")
       + (latest.worn === undefined ? "" : latest.worn ? " · band worn" : ' · <span style="color:var(--c-hr)">band not worn</span>') : "&nbsp;";
   });
@@ -432,6 +457,118 @@ $("share-btn").onclick = () => {
     if (watchId !== null) navigator.geolocation.clearWatch(watchId); watchId = null;
     btn.classList.remove("on"); btn.textContent = "Share this phone's location";
   }, { enableHighAccuracy: true, maximumAge: 5000, timeout: 30000 });
+};
+
+function phoneHeartFresh() {
+  return phoneHeart && num(phoneHeart.bpm) && num(phoneHeart.timestamp) && serverNow() - phoneHeart.timestamp < HEART_FRESH_MS;
+}
+
+/* ---------- heart rate from the phone camera ----------
+   A fingertip over the camera and flash turns the picture red. With each heartbeat
+   more blood flows into the fingertip, so the picture gets very slightly darker.
+   The page measures the brightness 30 times a second and counts those small dips. */
+const HR_SECONDS = 20;
+let hrStream = null, hrTimer = null, hrSamples = [], hrStart = 0;
+
+function hrStop(msg) {
+  if (hrTimer) cancelAnimationFrame(hrTimer); hrTimer = null;
+  if (hrStream) hrStream.getTracks().forEach(t => t.stop()); hrStream = null;
+  $("hr-btn").textContent = "Measure heart rate"; $("hr-btn").classList.remove("stop");
+  if (msg) $("hr-state").textContent = msg;
+}
+
+function hrCompute(samples) {
+  if (samples.length < 60) return null;
+  // pick the colour channel that changes most (red is often maxed out by the flash)
+  const pick = ch => samples.map(x => x[ch]);
+  const spread = a => Math.max(...a) - Math.min(...a);
+  let v = spread(pick("r")) > spread(pick("g")) && Math.max(...pick("r")) < 252 ? pick("r") : pick("g");
+  const t = samples.map(x => x.t);
+  // remove slow drift: subtract a 1-second moving average
+  const det = v.map((x, i) => {
+    let s = 0, n = 0;
+    for (let j = i; j >= 0 && t[i] - t[j] < 500; j--) { s += v[j]; n++; }
+    for (let j = i + 1; j < v.length && t[j] - t[i] < 500; j++) { s += v[j]; n++; }
+    return x - s / n;
+  });
+  // smooth out camera noise, and flip so a heartbeat (darker) is a peak
+  const sm = det.map((x, i) => { let s = 0, n = 0; for (let j = Math.max(0, i - 2); j <= Math.min(det.length - 1, i + 2); j++) { s += det[j]; n++; } return -s / n; });
+  // peaks: highest point within 0.3 s either side, at least 0.33 s apart (under 180 BPM)
+  const peaks = [];
+  for (let i = 1; i < sm.length - 1; i++) {
+    if (sm[i] <= 0) continue;
+    let top = true;
+    for (let j = i - 1; j >= 0 && t[i] - t[j] < 300; j--) if (sm[j] > sm[i]) { top = false; break; }
+    if (top) for (let j = i + 1; j < sm.length && t[j] - t[i] < 300; j++) if (sm[j] >= sm[i]) { top = false; break; }
+    if (top && (!peaks.length || t[i] - peaks[peaks.length - 1] > 330)) peaks.push(t[i]);
+  }
+  if (peaks.length < 6) return { wave: sm, bpm: null };
+  const gaps = peaks.slice(1).map((p, i) => p - peaks[i]).sort((a, b) => a - b);
+  const mid = gaps[Math.floor(gaps.length / 2)];
+  const bpm = Math.round(60000 / mid);
+  return { wave: sm, bpm: bpm >= 40 && bpm <= 180 ? bpm : null };
+}
+
+function hrDraw(wave) {
+  const cv = $("hr-wave"), g = cv.getContext("2d"), w = cv.width, h = cv.height;
+  g.clearRect(0, 0, w, h);
+  const last = wave.slice(-180); if (last.length < 2) return;
+  const lo = Math.min(...last), hi = Math.max(...last), r = hi - lo || 1;
+  g.strokeStyle = getComputedStyle(document.documentElement).getPropertyValue("--c-hr").trim() || "#DC2626";
+  g.lineWidth = 3; g.beginPath();
+  last.forEach((x, i) => { const px = i / (last.length - 1) * w, py = h - 8 - (x - lo) / r * (h - 16); i ? g.lineTo(px, py) : g.moveTo(px, py); });
+  g.stroke();
+}
+
+$("hr-btn").onclick = async () => {
+  if (hrStream) { hrStop("Stopped"); return; }
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) { $("hr-state").textContent = "This browser cannot use the camera. Open the page in Chrome on the phone."; return; }
+  $("hr-state").textContent = "Asking for camera permission…"; $("hr-val").textContent = "";
+  try {
+    hrStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: "environment" }, width: { ideal: 320 }, height: { ideal: 240 } }, audio: false });
+  } catch (e) { hrStream = null; $("hr-state").textContent = "Camera blocked. Allow camera for this site in the browser settings."; return; }
+  const track = hrStream.getVideoTracks()[0];
+  let torch = false;
+  try { const caps = track.getCapabilities ? track.getCapabilities() : {}; if (caps.torch) { await track.applyConstraints({ advanced: [{ torch: true }] }); torch = true; } } catch (e) {}
+  const video = $("hr-video"); video.srcObject = hrStream; await video.play();
+  $("hr-btn").textContent = "Stop"; $("hr-btn").classList.add("stop"); $("hr-wave").classList.remove("hidden");
+  const cv = document.createElement("canvas"); cv.width = 40; cv.height = 30; const cx = cv.getContext("2d", { willReadFrequently: true });
+  hrSamples = []; hrStart = 0; let lastShow = 0;
+
+  const step = () => {
+    cx.drawImage(video, 0, 0, 40, 30);
+    const d = cx.getImageData(0, 0, 40, 30).data; let r = 0, g = 0;
+    for (let i = 0; i < d.length; i += 4) { r += d[i]; g += d[i + 1]; }
+    r /= d.length / 4; g /= d.length / 4;
+    const now = performance.now();
+    const finger = r > 90 && r > g * 1.6;          // a covered, lit fingertip looks strongly red
+    if (!finger) {
+      hrSamples = []; hrStart = 0; $("hr-bar").style.width = "0";
+      $("hr-state").textContent = torch ? "Cover the camera and flash fully with your fingertip" : "Cover the camera with your fingertip (no flash on this phone: stand in bright light)";
+    } else {
+      if (!hrStart) hrStart = now;
+      hrSamples.push({ t: now, r, g });
+      const done = (now - hrStart) / 1000;
+      $("hr-bar").style.width = Math.min(100, done / HR_SECONDS * 100) + "%";
+      if (now - lastShow > 1000) {
+        lastShow = now;
+        const res = hrCompute(hrSamples);
+        if (res) { hrDraw(res.wave); if (res.bpm && done > 8) $("hr-val").innerHTML = res.bpm + "<small>BPM</small>"; }
+        $("hr-state").textContent = `Measuring… hold still (${Math.max(0, Math.ceil(HR_SECONDS - done))} s)`;
+      }
+      if (done >= HR_SECONDS) {
+        const res = hrCompute(hrSamples);
+        if (res && res.bpm) {
+          $("hr-val").innerHTML = res.bpm + "<small>BPM</small>";
+          hrStop("Done. Saved to the dashboard.");
+          if (heartWriter) heartWriter(res.bpm); else { phoneHeart = { bpm: res.bpm, timestamp: serverNow() }; renderLatest(); }
+        } else hrStop("Could not read a clear pulse. Press a little lighter, keep still, and try again.");
+        return;
+      }
+    }
+    hrTimer = requestAnimationFrame(step);
+  };
+  hrTimer = requestAnimationFrame(step);
 };
 
 function renderHistory(rows) {
@@ -556,6 +693,9 @@ async function runLive() {
     onValue(query(ref(db, "HeatStressGuardian/history"), limitToLast(60)), s => renderHistory(Object.values(s.val() || {})));
     onValue(ref(db, "HeatStressGuardian/ai/latest"), s => renderAI(s.val()));
     onValue(ref(db, "HeatStressGuardian/phoneLocation"), s => { phoneLoc = s.val(); renderLocation(); });
+    onValue(ref(db, "HeatStressGuardian/phoneHeart"), s => { phoneHeart = s.val(); if (latest) renderLatest(); });
+    heartWriter = bpm => set(ref(db, "HeatStressGuardian/phoneHeart"), { bpm, timestamp: serverTimestamp() })
+      .catch(e => { $("hr-state").textContent = "Could not save: " + (e.code || e.message); });
     shareWriter = loc => set(ref(db, "HeatStressGuardian/phoneLocation"), { ...loc, timestamp: serverTimestamp() })
       .catch(e => { $("share-state").textContent = "Could not save: " + (e.code || e.message); });
     onValue(query(ref(db, "HeatStressGuardian/ai/history"), limitToLast(10)), s => renderAlerts(Object.values(s.val() || {})));
